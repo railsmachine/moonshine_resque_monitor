@@ -1,0 +1,107 @@
+#!/usr/bin/env ruby
+
+require 'rubygems'
+require 'json'
+
+class ResqueMonitor
+
+  @@max_time = 3600
+  @@max_memory = 0
+
+  def self.max_time=(t)
+    @@max_time = t.to_i
+  end
+
+  def self.max_time
+    @@max_time
+  end
+  
+  def self.max_memory=(m)
+    @@max_memory = m
+  end
+  
+  def self.max_memory
+    @@max_memory
+  end
+
+  def self.check
+    o = { :action => 'starting', :timestamp => Time.now }.to_json
+    puts o
+    workers = self.workers
+    workers.each do |worker|
+      o = {
+        'pid' => worker[:pid],
+        'queue' => worker[:queue],
+        'action' => 'kill',
+        'runtime' => worker[:runtime]
+      }
+      
+      if self.max_time > 0 && worker[:runtime] > self.max_time && worker[:ppid] > 1
+        # Sending SIGUSR1 to the parent, which should kill the job and keep processing, as long as the pid isn't 1.
+        o[:reason] = "max_time"
+        puts o.to_json
+        self.sigusr(worker[:ppid])
+      elsif self.max_memory > 0 && self.memory_use(worker[:pid]) > self.max_memory && worker[:ppid] > 1
+        # Sending SIGUSR1 to the parent, which should kill the job and keep processing, as long as the pid isn't 1.
+        o[:reason] = "max_memory"
+        puts o.to_json
+        self.sigusr(worker[:ppid])
+      end
+      
+    end 
+    o = { :action => 'finished', :timestamp => Time.now }.to_json
+    puts o
+    return ''
+  end
+
+  def self.kill(pid)
+    `kill -9 #{pid}`
+  end
+
+  def self.sigusr(pid)
+    `kill -s SIGUSR1 #{pid}`
+  end
+
+  def self.memory_use(pid)
+    pmap = `sudo pmap -x #{pid}`
+    if pmap == ""
+      return 0
+    end
+    line = pmap.split("\n").last.split
+    memory = line[2].to_i
+    if memory > 0
+      return memory/1024
+    end
+    0
+  end
+
+  def self.now
+    @@now ||= Time.now.to_i
+  end
+
+  def self.workers
+    processes = `ps -eo pid,ppid,command | grep resque | grep Processing`
+    arr = processes.split("\n")
+    out = []
+    arr.each do |item|
+      next if item.include?("grep") && item.include?("pid,command")
+      pair = item.split("[").first.split(" ")
+      since = pair.last.to_i
+      runtime = self.now - since
+      out << {
+         :cmd => pair.join(" "),
+         :pid => pair.first.to_i,
+         :ppid => pair[1].to_i,
+         :since => pair.last.to_i,
+         :runtime => runtime,
+         :queue => pair[4]
+      }
+    end
+    out
+  end
+
+end
+
+ResqueMonitor.max_time = (ARGV.first || 0).to_i
+ResqueMonitor.max_memory = (ARGV.last || 0).to_i
+ResqueMonitor.check
